@@ -1,12 +1,19 @@
 import requests, json
+import pandas as pd
+from io import StringIO
+import datetime
+import getpass
 from degiroapi.order import Order
 from degiroapi.client_info import ClientInfo
 from degiroapi.datatypes import Data
 from degiroapi.intervaltypes import Interval
 
+session = requests.Session()
+
 
 class DeGiro:
     __LOGIN_URL = 'https://trader.degiro.nl/login/secure/login'
+    __LOGIN_TOTP_URL = 'https://trader.degiro.nl/login/secure/login/totp'
     __CONFIG_URL = 'https://trader.degiro.nl/login/secure/config'
 
     __LOGOUT_URL = 'https://trader.degiro.nl/trading/secure/logout'
@@ -17,13 +24,20 @@ class DeGiro:
     __PRODUCT_SEARCH_URL = 'https://trader.degiro.nl/product_search/secure/v5/products/lookup'
     __PRODUCT_INFO_URL = 'https://trader.degiro.nl/product_search/secure/v5/products/info'
     __TRANSACTIONS_URL = 'https://trader.degiro.nl/reporting/secure/v4/transactions'
+    __TRANSACTIONS_CSV_URL = 'https://trader.degiro.nl/reporting/secure/v3/transactionReport/csv'
     __ORDERS_URL = 'https://trader.degiro.nl/reporting/secure/v4/order-history'
+    __DIVIDENDS_URL = 'https://trader.degiro.nl/reporting/secure/v3/ca/'
 
+    __ACCOUNT_URL = 'https://trader.degiro.nl/reporting/secure/v6/accountoverview'
+    __ACCOUNT_CSV_URL = 'https://trader.degiro.nl/reporting/secure/v3/cashAccountReport/csv'
     __PLACE_ORDER_URL = 'https://trader.degiro.nl/trading/secure/v5/checkOrder'
     __ORDER_URL = 'https://trader.degiro.nl/trading/secure/v5/order/'
 
     __DATA_URL = 'https://trader.degiro.nl/trading/secure/v5/update/'
     __PRICE_DATA_URL = 'https://charting.vwdservices.com/hchart/v1/deGiro/data.js'
+
+    __COMPANY_RATIOS_URL = 'https://trader.degiro.nl/dgtbxdsservice/company-ratios/'
+    __COMPANY_PROFILE = 'https://trader.degiro.nl/dgtbxdsservice/company-profile/v2/'
 
     __GET_REQUEST = 0
     __POST_REQUEST = 1
@@ -34,15 +48,33 @@ class DeGiro:
     client_info = any
     confirmation_id = any
 
-    def login(self, username, password):
+    def __init__(self, username=None, password=None, totp=None):
+        if username:  # Login prompt
+            self.login_prompt(username=username, password=password, totp=totp)
+
+    def login(self, username, password, totp=None):
         login_payload = {
             'username': username,
             'password': password,
             'isPassCodeReset': False,
             'isRedirectToMobile': False
         }
-        login_response = self.__request(DeGiro.__LOGIN_URL, None, login_payload, request_type=DeGiro.__POST_REQUEST,
-                                        error_message='Could not login.')
+        if totp is not None:
+            login_payload["oneTimePassword"] = totp
+            login_response = self.__request(DeGiro.__LOGIN_TOTP_URL, None, login_payload,
+                                            request_type=DeGiro.__POST_REQUEST,
+                                            error_message='Could not login.')
+        else:
+            try:
+                login_response = self.__request(DeGiro.__LOGIN_URL, None, login_payload, request_type=DeGiro.__POST_REQUEST,
+                                                error_message='Could not login.')
+            except Exception:
+                totp = getpass.getpass("totp (Leave empty if none):")
+                login_payload["oneTimePassword"] = totp
+                login_response = self.__request(DeGiro.__LOGIN_TOTP_URL, None, login_payload,
+                                                request_type=DeGiro.__POST_REQUEST,
+                                                error_message='Could not login.')
+
         self.session_id = login_response['sessionId']
         client_info_payload = {'sessionId': self.session_id}
         client_info_response = self.__request(DeGiro.__CLIENT_INFO_URL, None, client_info_payload,
@@ -59,6 +91,14 @@ class DeGiro:
 
         return client_info_response
 
+    def login_prompt(self, username=None, password=None, totp=None):
+
+        if not username: username = input("Username: ")
+        if not password: password = getpass.getpass("Password:")
+        if not totp:     totp = getpass.getpass("totp (Leave empty if none):")
+
+        return self.login(username, password, totp or None)
+
     def logout(self):
         logout_payload = {
             'intAccount': self.client_info.account_id,
@@ -69,26 +109,35 @@ class DeGiro:
 
     @staticmethod
     def __request(url, cookie=None, payload=None, headers=None, data=None, post_params=None, request_type=__GET_REQUEST,
-                  error_message='An error occurred.'):
+                  csv=False, error_message='An error occurred.'):
 
         if request_type == DeGiro.__DELETE_REQUEST:
-            response = requests.delete(url, json=payload)
+            response = session.delete(url, json=payload)
         elif request_type == DeGiro.__GET_REQUEST and cookie:
-            response = requests.get(url, cookies=cookie)
+            response = session.get(url, cookies=cookie)
         elif request_type == DeGiro.__GET_REQUEST:
-            response = requests.get(url, params=payload)
+            response = session.get(url, params=payload)
         elif request_type == DeGiro.__POST_REQUEST and headers and data:
-            response = requests.post(url, headers=headers, params=payload, data=data)
+            response = session.post(url, headers=headers, params=payload, data=data)
         elif request_type == DeGiro.__POST_REQUEST and post_params:
-            response = requests.post(url, params=post_params, json=payload)
+            response = session.post(url, params=post_params, json=payload)
         elif request_type == DeGiro.__POST_REQUEST:
-            response = requests.post(url, json=payload)
+            response = session.post(url, json=payload)
         else:
             raise Exception(f'Unknown request type: {request_type}')
 
         if response.status_code == 200 or response.status_code == 201:
+            if csv == True:
+                try:
+                    df = pd.read_csv(StringIO(response.text))
+                    return df
+                except:
+                    return "No data"
             try:
                 return response.json()
+            except ValueError:
+                df = pd.read_csv(StringIO(response.text))
+                return df
             except:
                 return "No data"
         else:
@@ -118,14 +167,24 @@ class DeGiro:
 
     def transactions(self, from_date, to_date, group_transactions=False):
         transactions_payload = {
-            'fromDate': from_date.strftime('%d/%m/%Y'),
-            'toDate': to_date.strftime('%d/%m/%Y'),
+            'fromDate': self.validate(from_date),
+            'toDate': self.validate(to_date),
             'group_transactions_by_order': group_transactions,
             'intAccount': self.client_info.account_id,
             'sessionId': self.session_id
         }
         return self.__request(DeGiro.__TRANSACTIONS_URL, None, transactions_payload,
                               error_message='Could not get transactions.')['data']
+
+    def account_overview(self, from_date, to_date):
+        account_payload = {
+            'fromDate': self.validate(from_date),
+            'toDate': self.validate(to_date),
+            'intAccount': self.client_info.account_id,
+            'sessionId': self.session_id
+        }
+        return self.__request(DeGiro.__ACCOUNT_URL, None, account_payload,
+                              error_message='Could not get account overview.')['data']
 
     def orders(self, from_date, to_date, not_executed=None):
         orders_payload = {
@@ -316,3 +375,84 @@ class DeGiro:
         return \
             self.__request(DeGiro.__GET_STOCKS_URL, None, stock_list_params, error_message='Could not get stock list')[
                 'products']
+
+    def transactions_csv(self, from_date, to_date):
+        transactions_payload = {
+            'intAccount': self.client_info.account_id,
+            'sessionId': self.session_id,
+            'country': 'ES',
+            'lang': 'es',
+            'fromDate': self.validate(from_date),
+            'toDate': self.validate(to_date)
+        }
+        df = self.__request(DeGiro.__TRANSACTIONS_CSV_URL, None, transactions_payload, csv=True,
+                              error_message='Could not get transactions.')
+        df.insert(loc=0, column='Date', value=pd.to_datetime(df.pop('Fecha') + df.pop('Hora'), format='%d-%m-%Y%H:%M'))
+        return df
+
+    def account_overview_csv(self, from_date, to_date):
+        transactions_payload = {
+            'intAccount': self.client_info.account_id,
+            'sessionId': self.session_id,
+            'country': 'ES',
+            'lang': 'es',
+            'fromDate': self.validate(from_date),
+            'toDate': self.validate(to_date)
+        }
+        df = self.__request(DeGiro.__ACCOUNT_CSV_URL, None, transactions_payload, csv=True,
+                              error_message='Could not get account overview.')
+        df.insert(loc=0, column='Date', value=pd.to_datetime(df.pop('Fecha') + df.pop('Hora'), format='%d-%m-%Y%H:%M'))
+        return df
+
+    def validate(self, strordate):
+        if isinstance(strordate, datetime.datetime):
+            strordate = strordate.strftime('%d/%m/%Y')
+        else:
+            try:
+                strordate = datetime.datetime.strptime(strordate, '%d/%m/%Y').strftime('%d/%m/%Y')
+            except ValueError:
+                raise ValueError("Incorrect data format, should be DD-MM-YYYY")
+        return strordate
+
+    def future_dividends(self):
+        dividends_payload = {
+            'intAccount': self.client_info.account_id,
+            'sessionId': self.session_id
+        }
+        return self.__request(DeGiro.__DIVIDENDS_URL + str(self.client_info.account_id), None, dividends_payload,
+                              error_message='Could not get future dividends.')['data']
+
+    def products_info(self, product_ids):
+        product_info_payload = {
+            'intAccount': self.client_info.account_id,
+            'sessionId': self.session_id
+        }
+        return self.__request(DeGiro.__PRODUCT_INFO_URL, None, product_info_payload,
+                              headers={'content-type': 'application/json'},
+                              data=json.dumps([str(p) for p in product_ids]),
+                              request_type=DeGiro.__POST_REQUEST,
+                              error_message='Could not get product info.')['data']
+
+    def company_ratios(self, product_isin):
+        if isinstance(product_isin, int):
+            product_isin = str(product_isin)
+        product_info_payload = {
+            'intAccount': self.client_info.account_id,
+            'sessionId': self.session_id
+        }
+        return self.__request(DeGiro.__COMPANY_RATIOS_URL + product_isin,
+                              None, product_info_payload,
+                              headers={'content-type': 'application/json'},
+                              data=None,
+                              request_type=DeGiro.__GET_REQUEST,
+                              error_message='Could not get company ratios.')['data']
+
+    def company_profile(self, product_isin):
+        product_info_payload = {
+            'intAccount': self.client_info.account_id,
+            'sessionId': self.session_id
+        }
+        return self.__request(DeGiro.__COMPANY_PROFILE + product_isin,
+                              None, product_info_payload,
+                              headers={'content-type': 'application/json'},
+                              error_message='Could not get company profile.')['data']
