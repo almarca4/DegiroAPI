@@ -65,14 +65,7 @@ class DeGiro:
                                             request_type=DeGiro.__POST_REQUEST,
                                             error_message='Could not login.')
         else:
-            try:
-                login_response = self.__request(DeGiro.__LOGIN_URL, None, login_payload, request_type=DeGiro.__POST_REQUEST,
-                                                error_message='Could not login.')
-            except Exception:
-                totp = getpass.getpass("totp (Leave empty if none):")
-                login_payload["oneTimePassword"] = totp
-                login_response = self.__request(DeGiro.__LOGIN_TOTP_URL, None, login_payload,
-                                                request_type=DeGiro.__POST_REQUEST,
+            login_response = self.__request(DeGiro.__LOGIN_URL, None, login_payload, request_type=DeGiro.__POST_REQUEST,
                                                 error_message='Could not login.')
 
         self.session_id = login_response['sessionId']
@@ -95,7 +88,11 @@ class DeGiro:
 
         if not username: username = input("Username: ")
         if not password: password = getpass.getpass("Password:")
-        if not totp:     totp = getpass.getpass("totp (Leave empty if none):")
+        try:
+            self.login(username, password)
+        except Exception:
+            totp = getpass.getpass("totp (Leave empty if none):")
+            self.login(username, password, totp)
 
         return self.login(username, password, totp or None)
 
@@ -225,8 +222,7 @@ class DeGiro:
                 data.append(item['value'][1]['value'] + " " + str(item['value'][2]['value']))
         return data
 
-    @staticmethod
-    def filterportfolio(portfolio, filter_zero=None):
+    def filterportfolio(self, portfolio, filter_zero=None):
         data = []
         data_non_zero = []
         for item in portfolio['portfolio']['value']:
@@ -237,9 +233,14 @@ class DeGiro:
                 price = i['value'] if i['name'] == 'price' else price
                 value = i['value'] if i['name'] == 'value' else value
                 breakEvenPrice = i['value'] if i['name'] == 'breakEvenPrice' else breakEvenPrice
+            if item['value'][1]['value'] != 'CASH':
+                info = self.product_info(item['id'])
+            else:
+                info = []
             data.append({
-                "id": item['id'],
-                "positionType": positionType,
+                "name": info['name'] if 'name' in info else item['id'],
+                "symbol": info['symbol'] if 'symbol' in info else positionType,
+                "positionType": info['productType'] if 'productType' in info else positionType,
                 "size": size,
                 "price": price,
                 "value": value,
